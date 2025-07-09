@@ -2,7 +2,8 @@
 #   docker build --build-arg SGL_BRANCH=v0.4.9 --build-arg ARG_PYTORCH_ROCM_ARCH=[gfx950|gfx942] -t v0.4.9-rocm700 -f Dockerfile.rocm .
 
 # default base image
-ARG BASE_IMAGE_950="rocm/7.0-preview:rocm7.0_preview_ubuntu_22.04_sglang_0.4.6.post4_mi35X_prealpha"
+ARG BASE_IMAGE_950="rocm/7.0-preview:rocm7.0_preview_ubuntu_22.04_vllm_0.8.5_mi35X_prealpha"
+#ARG BASE_IMAGE_950="rocm/7.0-preview:rocm7.0_preview_ubuntu_22.04_sglang_0.4.6.post4_mi35X_prealpha"
 ARG BASE_IMAGE_942="rocm/sgl-dev:vllm20250114"
 
 ARG ARG_PYTORCH_ROCM_ARCH
@@ -38,9 +39,9 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH:-${PYTORCH_ROCM_ARCH}}
 
 # Install some basic utilities
 RUN rm -rf /etc/apt/sources.list.d/*
-RUN apt-get update -q -y && apt-get install -q -y \
-    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
-    apt-transport-https ca-certificates wget curl
+#RUN apt-get update -q -y && apt-get install -q -y \
+#    sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
+#    apt-transport-https ca-certificates wget curl
 RUN python3 -m pip install --upgrade pip && pip install setuptools_scm
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
 
