@@ -3,7 +3,7 @@
 #   docker build --build-arg SGL_BRANCH=v0.4.9.post1 --build-arg GPU_ARCH=gfx950 -t v0.4.9.post1-rocm700-mi35x -f Dockerfile.rocm .
 
 # Default base images
-ARG BASE_IMAGE_950="rocm/7.0-preview:rocm7.0_preview_ubuntu_22.04_vllm_0.8.5_mi35X_prealpha"
+ARG BASE_IMAGE_950="rocm/7.0-preview:rocm7.0_preview_ubuntu_22.04_sglang_0.4.6.post4_mi35X_alpha"
 ARG BASE_IMAGE_942="rocm/sgl-dev:vllm20250114"
 
 # This is necessary for scope purpose
@@ -15,7 +15,6 @@ FROM $BASE_IMAGE_942 AS gfx942
 ENV BUILD_VLLM="0"
 ENV BUILD_TRITON="1"
 ENV BUILD_AITER_ALL="1"
-ENV AITER_COMMIT="v0.1.4"
 
 # ===============================
 # Base image 950 and args
@@ -23,7 +22,6 @@ FROM $BASE_IMAGE_950 AS gfx950
 ENV BUILD_VLLM="0"
 ENV BUILD_TRITON="0"
 ENV BUILD_AITER_ALL="1"
-ENV AITER_COMMIT="v0.1.4"
 
 # ===============================
 # Chosen arch and args
@@ -41,28 +39,28 @@ ARG TRITON_REPO="https://github.com/ROCm/triton.git"
 ARG TRITON_COMMIT="improve_fa_decode_3.0.0"
 
 ARG AITER_REPO="https://github.com/ROCm/aiter.git"
+ENV AITER_COMMIT="v0.1.4"
 
 USER root
 
 # Install some basic utilities
-RUN python -m pip install --upgrade pip && pip install setuptools_scm
-RUN apt-get purge -y sccache; python -m pip uninstall -y sccache; rm -f "$(which sccache)"
+RUN python -m pip install --upgrade pip && pip install setuptools_scm \
+ && apt-get purge -y sccache; python -m pip uninstall -y sccache; rm -f "$(which sccache)"
 
 WORKDIR /sgl-workspace
 
 # -----------------------
 # AITER
-RUN pip uninstall -y aiter
-RUN git clone ${AITER_REPO} \
+RUN pip uninstall -y aiter \
+ && git clone ${AITER_REPO} \
  && cd aiter \
  && git checkout ${AITER_COMMIT} \
- && git submodule update --init --recursive
-RUN cd aiter \
-     && if [ "$BUILD_AITER_ALL" = "1" ]; then \
-          PREBUILD_KERNELS=1 GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop; \
-        else \
-          GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop; \
-        fi
+ && git submodule update --init --recursive \
+ && if [ "$BUILD_AITER_ALL" = "1" ]; then \
+      PREBUILD_KERNELS=1 GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop; \
+    else \
+      GPU_ARCHS=$GPU_ARCH_LIST python setup.py develop; \
+    fi
 
 # -----------------------
 # Triton
@@ -98,8 +96,8 @@ RUN pip install IPython \
     && pip install torchao \
     && pip install pybind11
 
-RUN pip uninstall -y sgl_kernel sglang
-RUN git clone ${SGL_REPO} \
+RUN pip uninstall -y sgl_kernel sglang \
+    && git clone ${SGL_REPO} \
     && cd sglang \
     && if [ "${SGL_BRANCH}" = ${SGL_DEFAULT} ]; then \
          echo "Using ${SGL_DEFAULT}, default branch."; \
