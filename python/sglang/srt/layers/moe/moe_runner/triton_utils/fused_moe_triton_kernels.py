@@ -1125,6 +1125,99 @@ def _fused_append_shared_experts_with_weights_kernel(
     tl.store(out_weights_ptr + out_row_ptr + K + offs_s, shared_ws, mask=mask_s)
 
 
+@triton.jit
+def _fused_linear_sigmoid_mul_kernel(
+    x_ptr,  # [num_tokens, hidden]  gate input
+    w_ptr,  # [hidden]              gate weight (hidden -> 1)
+    shared_ptr,  # [num_tokens, hidden]  shared-expert output
+    out_ptr,  # [num_tokens, hidden]  gated result
+    hidden_size,
+    x_stride_m,
+    x_stride_k,
+    s_stride_m,
+    s_stride_k,
+    o_stride_m,
+    o_stride_k,
+    BLOCK_K: tl.constexpr,
+):
+    """One program per token: gate GEMV (hidden -> 1) + sigmoid + broadcast multiply.
+
+    Computes ``out[m] = sigmoid(dot(x[m], w)) * shared[m]`` in a single launch,
+    fusing what the eager path does as ``F.sigmoid(gate(x)) * shared_output`` (a
+    GEMV, a sigmoid, and an elementwise mul -> three kernels).
+    """
+    pid = tl.program_id(0)
+
+    x_row = x_ptr + pid * x_stride_m
+    acc = tl.zeros((BLOCK_K,), dtype=tl.float32)
+    for start in tl.range(0, hidden_size, BLOCK_K):
+        offs = start + tl.arange(0, BLOCK_K)
+        mask = offs < hidden_size
+        x_vals = tl.load(x_row + offs * x_stride_k, mask=mask, other=0.0).to(tl.float32)
+        w_vals = tl.load(w_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+        acc += x_vals * w_vals
+    gate = tl.sigmoid(tl.sum(acc, axis=0))
+
+    s_row = shared_ptr + pid * s_stride_m
+    o_row = out_ptr + pid * o_stride_m
+    for start in tl.range(0, hidden_size, BLOCK_K):
+        offs = start + tl.arange(0, BLOCK_K)
+        mask = offs < hidden_size
+        s_vals = tl.load(s_row + offs * s_stride_k, mask=mask, other=0.0)
+        res = s_vals.to(tl.float32) * gate
+        tl.store(o_row + offs * o_stride_k, res.to(s_vals.dtype), mask=mask)
+
+
+def fused_linear_sigmoid_mul(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    shared_output: torch.Tensor,
+) -> torch.Tensor:
+    """GPU (CUDA/HIP) counterpart of the AMX ``sgl_kernel.fused_linear_sigmoid_mul``.
+
+    Fuses the shared-expert gate ``sigmoid(x @ weight.T) * shared_output`` for a
+    ``hidden -> 1`` gate into one Triton launch.
+
+    Args:
+        x: ``[num_tokens, hidden]`` gate input (the layer's ``hidden_states``).
+        weight: gate weight, shape ``[1, hidden]`` or ``[hidden]`` (no bias).
+        shared_output: ``[num_tokens, hidden]`` shared-expert output to gate.
+
+    Returns:
+        ``[num_tokens, hidden]`` gated output, same dtype/layout as ``shared_output``.
+    """
+    assert x.dim() == 2 and shared_output.dim() == 2
+    assert x.shape[0] == shared_output.shape[0]
+    num_tokens, hidden_size = x.shape
+    assert shared_output.shape[1] == hidden_size
+
+    out = torch.empty_like(shared_output)
+    if num_tokens == 0:
+        return out
+
+    w = weight.reshape(-1)
+    assert w.shape[0] == hidden_size, "gate weight must map hidden -> 1"
+    w = w.contiguous()
+
+    BLOCK_K = min(triton.next_power_of_2(hidden_size), 2048)
+    _fused_linear_sigmoid_mul_kernel[(num_tokens,)](
+        x,
+        w,
+        shared_output,
+        out,
+        hidden_size,
+        x.stride(0),
+        x.stride(1),
+        shared_output.stride(0),
+        shared_output.stride(1),
+        out.stride(0),
+        out.stride(1),
+        BLOCK_K=BLOCK_K,
+        num_warps=4,
+    )
+    return out
+
+
 def fused_append_shared_experts_with_weights(
     topk_ids, topk_weights, shared_weights, num_fused_shared_experts, N=None
 ):

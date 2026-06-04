@@ -106,6 +106,11 @@ _is_cpu = is_cpu()
 _is_cpu_amx_available = cpu_has_amx_support()
 _is_hip = is_hip()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
+# Fuse the shared-expert gate (Linear hidden->1 + sigmoid + multiply) into a single
+# Triton kernel on GPU. Numerically equivalent to the eager path; toggle for A/B.
+_fuse_shared_expert_gate = get_bool_env_var(
+    "SGLANG_FUSE_SHARED_EXPERT_GATE", "true"
+) and (_is_cuda or _is_hip)
 
 
 def can_fuse_shared_expert(
@@ -370,6 +375,21 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
                         self.shared_expert_gate.weight,
                         self.shared_expert_gate.bias,
                         True,
+                        shared_output,
+                    )
+                elif (
+                    _fuse_shared_expert_gate
+                    and self.shared_expert_gate.bias is None
+                    and hidden_states.dim() == 2
+                    and hidden_states.shape[0] > 0
+                ):
+                    from sglang.srt.layers.moe.moe_runner.triton_utils.fused_moe_triton_kernels import (
+                        fused_linear_sigmoid_mul,
+                    )
+
+                    shared_output = fused_linear_sigmoid_mul(
+                        hidden_states,
+                        self.shared_expert_gate.weight,
                         shared_output,
                     )
                 else:
