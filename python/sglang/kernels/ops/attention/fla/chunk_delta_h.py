@@ -18,12 +18,27 @@ from sglang.kernels.ops.attention.fla.utils import (
     autotune_cache_kwargs,
     is_nvidia_hopper,
 )
+from sglang.srt.utils import is_gfx1250_supported
 
 NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8, 16]
 CHUNK_SIZE = 64
 GDN_CHUNK_H_BV = int(os.getenv("SGLANG_GDN_CHUNK_H_BV", "32"))
 GDN_CHUNK_H_NUM_WARPS = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_WARPS", "4"))
-GDN_CHUNK_H_NUM_STAGES = int(os.getenv("SGLANG_GDN_CHUNK_H_NUM_STAGES", "2"))
+# On gfx1250, triton's software pipeliner miscompiles the in-place state-store
+# epilogue at the bottom of this kernel: whenever a batch holds more than one
+# sequence and any sequence length is not a multiple of CHUNK_SIZE, the final
+# recurrent state written back to the cache pool is wrong, and varies between
+# runs on identical inputs. Everything else stays bit-exact -- the per-chunk
+# states in `h`, v_new and the attention output -- so it surfaces only as
+# degraded quality once decode resumes from the damaged state (GSM8K-200 on
+# Qwen3.5-397B: 0.860 batched vs 0.970 with pipelining off). num_stages=1,
+# BV>=64 and num_warps=8 each avoid it; keep the tuned tile and drop the
+# pipelining.
+GDN_CHUNK_H_NUM_STAGES = int(
+    os.getenv(
+        "SGLANG_GDN_CHUNK_H_NUM_STAGES", "1" if is_gfx1250_supported() else "2"
+    )
+)
 
 
 @triton.autotune(
