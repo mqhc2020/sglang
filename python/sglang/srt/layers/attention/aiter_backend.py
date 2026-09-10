@@ -3078,17 +3078,22 @@ class AiterAttnBackend(AttentionBackend):
                 if any(forward_batch.extend_prefix_lens_cpu):
                     bs = forward_batch.batch_size
                     kc, vc = self.token_to_kv_pool.get_kv_buffer(layer.layer_id)
-                    page = self.page_size
                     kv_indptr = self.forward_metadata.kv_indptr[: bs + 1]
-                    kv_pages = self.forward_metadata.kv_indices
+                    kv_slots = self.forward_metadata.kv_indices
                     seq_lens = forward_batch.seq_lens[:bs].to(torch.long)
-                    # Clamp per-seq kvlen to the pages this batch actually has
-                    # (page-granular metadata can disagree with seq_lens in
-                    # mixed/spec batches, which would gather out of bounds).
-                    pages_per_seq = (kv_indptr[1 : bs + 1] - kv_indptr[:bs]).to(
+                    # kv_indptr strides in TOKENS and kv_indices holds one pool
+                    # slot per token (create_flashinfer_kv_indices_triton fills
+                    # it from req_to_token), so there is no page arithmetic to
+                    # do here. Scaling these entries by page_size overshoots a
+                    # prefixed chunk's own tokens, so attention reads stale
+                    # slots for exactly the newest tokens: GSM8K 0.961 -> 0.410.
+                    # Clamp per-seq kvlen to the tokens this batch actually has
+                    # in kv_indices; metadata can disagree with seq_lens in
+                    # mixed/spec batches, which would gather out of bounds.
+                    toks_per_seq = (kv_indptr[1 : bs + 1] - kv_indptr[:bs]).to(
                         torch.long
                     )
-                    seq_lens = torch.minimum(seq_lens, pages_per_seq * page)
+                    seq_lens = torch.minimum(seq_lens, toks_per_seq)
                     total_k = int(seq_lens.sum().item())
                     cu_k = torch.zeros(bs + 1, dtype=torch.long, device=q.device)
                     torch.cumsum(seq_lens, 0, out=cu_k[1:])
@@ -3096,15 +3101,13 @@ class AiterAttnBackend(AttentionBackend):
                         torch.arange(bs, device=q.device), seq_lens
                     )
                     pos_in_seq = torch.arange(total_k, device=q.device) - cu_k[seq_ids]
-                    page_slot = kv_indptr[seq_ids].to(torch.long) + pos_in_seq // page
+                    slot = kv_indptr[seq_ids].to(torch.long) + pos_in_seq
                     varlen_ok = (
                         self.forward_metadata.max_kv_len is not None
-                        and int(page_slot.max().item()) < kv_pages.numel()
+                        and int(slot.max().item()) < kv_slots.numel()
                     )
                     if varlen_ok:
-                        tok_idx = (
-                            kv_pages[page_slot].to(torch.long) * page + pos_in_seq % page
-                        )
+                        tok_idx = kv_slots[slot].to(torch.long)
                         varlen_ok = int(tok_idx.max().item()) < kc.shape[0]
                     if varlen_ok:
                         k_in = (
